@@ -1,9 +1,9 @@
 import math
 import numpy as np
-from scipy import erf
+from scipy.special import erf
 from scipy.special import hyp1f1
 
-impAtoms=['H','He','Li','Be','B','C','N','O'.'F','Ne'] #implemented atoms
+impAtoms=['H','He','Li','Be','B','C','N','O','F','Ne'] #implemented atoms
 charges={impAtoms[i]:i+1 for i in range(len(impAtoms))}
 maxQNum = {'H':1,'He':1,'Li':2,'Be':2,'B':2,'C':2,'N':2,'O':2,'F':2,'Ne':2}#Maximum quantum number -> web scrape from periodic table dat and fill up through 3p
 maxOrbitals={'H':1,'He':1,'Li':2,'Be':2,'B':3,'C':3,'N':3,'O':3,'F':3,'Ne':3}
@@ -32,7 +32,7 @@ def parseXYZ(file):
             if len(sp)>0: # Allow future implementations for avoiding the coordinates of the first atom for origin
                 atoms.append(sp[0])
                 cords.append(sp[1:])
-    return numAtoms,atoms,cords
+    return numAtoms,atoms,np.array(cords,dtype=np.float)
 
 
 
@@ -68,29 +68,135 @@ def overlap(gA,gB):
 
 def kinetic(gA,gB):
     mag,K,p,Rp=gaussProd(gA,gB)
-    redexp=gA[0]*gA[1]/p
-    return redexp*(3-2*redexp*mag)/p**1.5*K
+    redexp=gA[0]*gB[0]/p
+    r=redexp*(3-2*redexp*mag)/p**1.5*K
+    #print(redexp)
+    return r
 
-def nucAttr(gA,gB,Rc,Zc):# what index of atom list
+def potential(gA,gB,Rc,Zc):#Nuclear Electron what index of atom list 
     """Just defined for electrons in 1/2s for now"""
     mag,K,p,Rp=gaussProd(gA,gB)
     #Rc=cords[atomnum]
     #Zc=charges[atoms[atomnum]] -> send as param
     return -2*K/math.sqrt(math.pi)*Zc/p*F0(p*np.linalg.norm(Rp-Rc)**2)
 
-def multiOverlap(gA,gB,gC,gD):
+def multiOverlap(gA,gB,gC,gD,bN=0):
     magAB,KAB,pAB,RpAB=gaussProd(gA,gB)
     magCD,KCD,pCD,RpCD=gaussProd(gC,gD)
+    r=2/math.sqrt(math.pi)*(pAB*pCD*(pAB+pCD)**0.5)**-1*KAB*KCD
+    if bN==0:
+        r*=F0(pAB*pCD/(pAB+pCD)*np.linalg.norm(RpAB-RpCD)**2)
+    else:
+        r*=boysN(pAB*pCD/(pAB+pCD)*np.linalg.norm(RpAB-RpCD)**2,bN)
+    return r
+
+
+def difGuess(pold,p,numBasis):
+    return sum([numBasis**-2*(pold[i,j]-p[i,j])**2 for i,j in zip(range(numBasis),range(numBasis))])**0.5
 
 
 
-
-
-def sto3G(atoms,cords,N):
+def sto3G(atoms,cords,N,eps=1e-4):
     """Calculate steady state Hartree Fock energy calculations for N electrons and 3Gaussian basis set"""
     assert len(atoms)==len(cords)
     
-    numBasis=sum((maxQNum(a) for a in atoms))
+    numBasis=sum((maxQNum[a] for a in atoms)) # don't use quantum num n
+    
+    ol=np.zeros((numBasis,numBasis))
+    kin=np.zeros((numBasis,numBasis))
+    pot=np.zeros((numBasis,numBasis))
+    MET=np.zeros((numBasis,numBasis,numBasis,numBasis))
+
+    for ia,atoma in enumerate(atoms):
+        Za=charges[atoma] #charge 
+        Ra=cords[ia] #center
+        for oa in range(maxQNum[atoma]):
+            coefa=gcoef[oa]
+            za=zeta[atoma][oa] #zeta
+            ga=alpha[oa]*za**2#gaussfactor
+            for a in range(3): ###in future design data structure for basis sets and make this function STO(n)G
+                for ib,atomb in enumerate(atoms):
+                    Zb=charges[atomb]
+                    Rb=cords[ib]
+                    for ob in range(maxQNum[atomb]):
+                        coefb=gcoef[ob]
+                        zb=zeta[atomb][ob] #zeta
+                        gb=alpha[ob]*zb**2#gaussfactor
+                        for b in range(3):
+                            i0=(ia+1)*(oa+1)-1
+                            i1=(ib+1)*(ob+1)-1
+                            ol[i0,i1]+=coefa[a]*coefb[b]*overlap((ga[a],Ra),(gb[b],Rb))
+                            kin[i0,i1]+=coefa[a]*coefb[b]*kinetic((ga[a],Ra),(gb[b],Rb))
+                            for i in range(len(atoms)):
+                                pot[i0,i1]+=coefa[a]*coefb[b]*potential((ga[a],Ra),(gb[b],Rb),cords[i],charges[atoms[i]])
+                            for ic,atomc in enumerate(atoms):
+                                Zc=charges[atomc]
+                                Rc=cords[ic]
+                                for oc in range(maxOrbitals[atomc]):
+                                    coefc=gcoef[oc]
+                                    zc=zeta[atomc][oc] #zeta
+                                    gc=alpha[oc]*zc**2#gaussfactor
+                                    for c in range(3):
+                                        for id,atomd in enumerate(atoms):
+                                            Zd=charges[atomd]
+                                            Rd=cords[id]
+                                            for od in range(maxOrbitals[atomd]):
+                                                coefd=gcoef[od]
+                                                zd=zeta[atomd][od]
+                                                gd=alpha[od]*zd**2
+                                                for d in range(3):
+                                                    i2=(ic+1)*(oc+1)-1
+                                                    i3=(id+1)*(od+1)-1
+                                                    MET[i0,i1,i2,i3]+=coefa[a]*coefb[b]*coefc[c]*coefd[d]*multiOverlap((ga[a],Ra),(gb[b],Rb),(gc[c],Rc),(gd[d],Rd)) # this line needs changed -> what determines the boys factor? any existence of p orb?
+    Hcore=kin+pot#core hamiltonian, doesn't change in iteration
+    ovals,ovecs=np.linalg.eig(ol)
+    odiag=np.dot(ovecs.T,np.dot(ol,ovecs))
+    orootdiag=np.diag(np.diagonal(odiag)**-0.5)
+    X=np.dot(ovecs,np.dot(orootdiag,ovecs.T)) #symmetrically orthogonalized
+
+    P=np.zeros((numBasis,numBasis))
+    pold=np.zeros((numBasis,numBasis))
+    ps=[]
+
+    thresh=1
+    while thresh>eps:
+        G=np.zeros((numBasis,numBasis))
+        for i in range(numBasis):
+            for j in range(numBasis):
+                for x in range(numBasis):
+                    for y in range(numBasis):
+                        G[i,j]+=P[x,y]*MET[i,j,y,x]-.5*MET[i,x,y,j]#pg 175
+        fock=Hcore+G
+        fp=np.dot(X.T,np.dot(fock,X))
+        evalfp,eigfp=np.linalg.eig(fp)
+        asc=evalfp.argsort()
+        evalfp=evalfp[asc]
+        eigfp=eigfp[:,asc]
+        C=np.dot(X,eigfp)
+      # print(f"C is {C}")
+        for i in range(numBasis):
+             for j in range(numBasis):
+                for k in range(N//2):
+                    P[i,j]=C[i,k]*C[j,k]# final wave function / orbital density mat
+        ps.append(P)
+        thresh=difGuess(pold,P,numBasis)
+        pold=P.copy()
+
+    #nuclear repulsion term
+    repulse=0
+    for ia,atoma in enumerate(atoms):
+        for ib,atomb in enumerate(atoms):
+            if ia!=ib:
+                zA=charges[atoma]
+                zB=charges[atomb]
+                Ra=cords[ia]
+                Rb=cords[ib]
+                repulse+=zA*zB/np.linalg.norm(Ra-Rb)
+    repulse*=.5
+    #print(X)
+    #print(f"\n{MET}")
+    return ps,evalfp,repulse,Hcore # list of density matrices + eigenvalues = E levels + nuclear repulsion term
+        
 
 
     
